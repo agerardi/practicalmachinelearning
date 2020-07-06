@@ -1,0 +1,151 @@
+---
+title: "**Practical Machine Learning Course Project: Human Activity Recognition**"
+author: "Alberto Gerardi"
+date: "06/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Executive summary 
+
+In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset). The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set.
+
+## 2. Import data
+Let's import libraries and data, and execute some exploratory analysis:
+
+```{r load_data, echo=TRUE, message=FALSE, cache=TRUE}
+set.seed(12345)
+library(caret)
+allData <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", header =TRUE, sep =",")
+testData <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", header =TRUE, sep =",")
+
+# Split data in training data and validation data:
+inTrain <- createDataPartition(y = allData$classe, p = 0.8, list = FALSE)
+trainData <- allData[inTrain,]
+validData <- allData[-inTrain,]
+
+# Store X and Y for later use:
+x_train <- trainData[, 1:159]
+y_train <- trainData$classe
+y_valid <- validData$classe
+
+```
+
+## 3. Prepare data
+Let's prepare training data before launching the learning algorithm.
+```{r prep_traindata, echo=TRUE, message=FALSE, cache=TRUE}
+
+# Remove zero-variance predictors:
+nzv_cols <- nearZeroVar(trainData, saveMetrics= TRUE)
+p <- which(nzv_cols$nzv == TRUE | nzv_cols$zeroVar == TRUE)
+
+# Remove predictors which containts more than 15000 NA's (on 15699 records), since NA's can be harmful for some learning algorithms:
+q <- unname(which(apply(apply(trainData,2,is.na),2,sum) > 15000))
+
+# Remove also columns: X, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp and num_window:
+r <- c(1, 3, 4, 5, 7)
+
+# Compute the whole set of columns to remove and then remove them:
+cols_to_remove <- union(r, union(p, q))
+trainData <- trainData[-cols_to_remove]
+
+# Verify that the remaining columns contain no NA'S:
+anyNA(trainData)
+
+# Creating dummy variables is converting a categorical variable to as 
+# many binary variables as here are categories (column user_name in our case):
+dummies_model  <- dummyVars(" ~ user_name", data = trainData)
+
+# Create the dummy variables using predict. The Y variable (classe) will 
+# not be present in trainData_mat:
+trainData_mat <- data.frame(predict(dummies_model, newdata = trainData))
+trainData <- cbind(trainData_mat, trainData)
+
+# Remove user_name column and classe (before normalization):
+trainData <- subset(trainData, select=-c(user_name, classe))
+
+# Apply a normalization to remaining predictors:
+preProcess_center_scale_model <- preProcess(trainData, method=c("center", "scale"))
+trainData <- predict(preProcess_center_scale_model, newdata = trainData)
+
+# Append the Y variable:
+trainData$classe <- y_train
+
+# Let's analyze which predictors could be more important, using featurePlot:
+# if you group the X variable by the categories of Y, a significant mean shift 
+# amongst the X's groups is a strong indicator (if not the only indicator) 
+# that X will have a significant role to help predict Y:
+
+featurePlot(x = trainData[, 1:58], 
+            y = trainData$classe, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+
+# Let's remove not promising predictors shown in the featurePlot:
+trainData <- subset(trainData, select=-c(1:6,8,11:14,17:26,28:29,37:42,44,49:52,55,58))
+```
+As can be seen from the featurePlot, the dummy variables created from user_name are irrelevant for the prediction, and so have been removed besides other not significant variables.
+
+## 4. Train the algorithm
+
+Let's use a random forest algorithm on training data. The choice is done because random forest is a very accurate algorithm and is suitable for classification problems. We use also cross validation to reduce overfitting.
+
+```{r training_algo, echo=TRUE, message=FALSE, cache=TRUE}
+# Set up a 10-fold cross validation, to reduce both bias and variance:
+tc <- trainControl(method = "cv", number=10)
+# Include the setup in your model:
+modFit <- train(classe~.,method="rf",data=trainData, trControl=tc)
+# Print the final model:
+print(modFit$finalModel)
+# Show most important predictors:
+varimp <- varImp(modFit)
+plot(varimp, main="Variable Importance with RF")
+```
+
+The four most important predictors seem to be roll_belt, yaw_belt, magnet_dumbbell_z and pitch_forearm.
+
+## 5 Evaluate error
+Let's evaluate the error using validation data.
+
+```{r error, echo=TRUE, message=FALSE, cache=TRUE}
+# Apply to validData all the transformations done on trainData:
+validData <- validData[-cols_to_remove]
+validData_mat <- data.frame(predict(dummies_model, newdata = validData))
+validData <- cbind(validData_mat, validData)
+validData <- subset(validData, select=-c(user_name, classe))
+validData <- predict(preProcess_center_scale_model, newdata = validData)
+validData <- subset(validData, select=-c(1:6,8,11:14,17:26,28:29,37:42,44,49:52,55,58))
+pred_valid <- predict(modFit, validData)
+validData$classe <- y_valid
+confusionMatrix(pred_valid, validData$classe)
+```
+The accuracy (99.24%) is very high and let us suppose our algorithm can be considered very reliable.
+The error that we can estimate is the proportion of wrongly classified cases.
+
+```{r error_1, echo=TRUE, message=FALSE, cache=TRUE}
+length(which(pred_valid!=validData$classe)) / length(validData$classe) 
+```
+Also the estimated error (0.76%) seems to be very small, to confirm again the quality of our model.
+
+## 6. Predict on test data
+Let's do the prediction on the provided 20 test cases, using our model.
+
+```{r prediction, echo=TRUE, message=FALSE, cache=TRUE}
+# Apply to testData all the transformations done on trainData:
+testData <- testData[-cols_to_remove]
+testData_mat <- data.frame(predict(dummies_model, newdata = testData))
+testData <- cbind(testData_mat, testData)
+testData <- subset(testData, select=-c(user_name, problem_id))
+testData <- predict(preProcess_center_scale_model, newdata = testData)
+testData <- subset(testData, select=-c(1:6,8,11:14,17:26,28:29,37:42,44,49:52,55,58))
+final_prediction <- predict(modFit, testData)
+final_prediction
+```
+
+
+
